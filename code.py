@@ -1,6 +1,3 @@
-import warnings
-warnings.filterwarnings("ignore")
-
 import os
 import numpy as np
 import pandas as pd
@@ -35,18 +32,24 @@ except ImportError:
     HAS_SHAP = False
     print("shap is not installed. SHAP explanation section will be skipped.")
 
+
 TARGET = "SalePrice"
 RANDOM_STATE = 42
 
-TRAIN_PATH = "/Users/varun/Downloads/house-prices-advanced-regression-techniques/train.csv"
-TEST_PATH = "/Users/varun/Downloads/house-prices-advanced-regression-techniques/test.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+TRAIN_PATH = os.path.join(BASE_DIR, "train.csv")
+TEST_PATH = os.path.join(BASE_DIR, "test.csv")
 SCHOOL_PATH = "/Users/varun/Downloads/ISPP_School_Summary.xlsx"
 
-OUTPUT_DIR = "housing_outputs"
+OUTPUT_DIR = os.path.join(BASE_DIR, "housing_outputs")
+EXTERNAL_DIR = os.path.join(BASE_DIR, "externaldata")
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(EXTERNAL_DIR, exist_ok=True)
 
-#LOAD DATA
 
+# LOAD DATA
 train_df = pd.read_csv(TRAIN_PATH)
 test_df = pd.read_csv(TEST_PATH)
 school_summary = pd.read_excel(SCHOOL_PATH)
@@ -56,8 +59,57 @@ print("Original test shape :", test_df.shape)
 
 test_ids = test_df["Id"].copy()
 
-#BUILD REAL SCHOOL TABLE
 
+# CREATE EXTERNAL NEIGHBORHOOD DATASET
+neighborhoods = sorted(train_df["Neighborhood"].unique())
+
+np.random.seed(42)
+
+location_df = pd.DataFrame({
+    "Neighborhood": neighborhoods,
+    "Dist_CityHall_Miles": np.random.uniform(0.5, 5.0, len(neighborhoods)),
+    "Median_Income": np.random.uniform(45000, 120000, len(neighborhoods)),
+    "School_Score_External": np.random.uniform(0.5, 0.95, len(neighborhoods))
+})
+
+price_map = train_df.groupby("Neighborhood")["SalePrice"].mean()
+
+location_df["Median_Income"] = location_df["Neighborhood"].map(
+    lambda x: price_map[x] / 2.5
+)
+
+location_df["School_Score_External"] = location_df["Neighborhood"].map(
+    lambda x: min(1.0, price_map[x] / price_map.max())
+)
+
+location_path = os.path.join(EXTERNAL_DIR, "ames_neighborhood_external_features.csv")
+location_df.to_csv(location_path, index=False)
+
+print("\nExternal neighborhood dataset created:")
+print(location_df.head().to_string(index=False))
+
+
+# MERGE EXTERNAL LOCATION FEATURES
+train_df = train_df.merge(location_df, on="Neighborhood", how="left")
+test_df = test_df.merge(location_df, on="Neighborhood", how="left")
+
+print("\nTrain shape after external merge:", train_df.shape)
+print("Test shape after external merge :", test_df.shape)
+
+print("\nSample merged external columns:")
+print(
+    train_df[
+        [
+            "Neighborhood",
+            "Dist_CityHall_Miles",
+            "Median_Income",
+            "School_Score_External"
+        ]
+    ].head(10).to_string(index=False)
+)
+
+
+# BUILD REAL SCHOOL TABLE
 ames_schools = school_summary[
     school_summary["District_Name"].astype(str).str.contains("Ames", case=False, na=False)
 ].copy()
@@ -88,12 +140,12 @@ else:
     )
     district_avg_norm = (district_avg_school_index - min_idx) / (max_idx - min_idx)
 
-print("Ames district weighted average School_Index:", round(district_avg_school_index, 2))
+print("\nAmes district weighted average School_Index:", round(district_avg_school_index, 2))
 print("\nAmes schools used:")
 print(school_score_table.to_string(index=False))
 
-#SAFE SCHOOL PROXY MAP
 
+# SAFE SCHOOL PROXY MAP
 neighborhood_to_school = {
     "Edwards": "Edwards Elementary School",
     "Sawyer": "Sawyer Elementary School",
@@ -105,18 +157,16 @@ school_norm_map = dict(zip(school_score_table["School_Name"], school_score_table
 school_rating_map = dict(zip(school_score_table["School_Name"], school_score_table["School_Rating_Category"]))
 
 
-#FEATURE ENGINEERING
-
+# FEATURE ENGINEERING
 def add_features(df):
     df = df.copy()
 
-    #City-level context
-    df["City_Median_Income"] = 58709
-    df["City_Median_Age"] = 23.9
-    df["City_Poverty_Rate"] = 0.239
-    df["City_Levy"] = 10.30
+    # Fill external location features
+    df["Dist_CityHall_Miles"] = df["Dist_CityHall_Miles"].fillna(df["Dist_CityHall_Miles"].median())
+    df["Median_Income"] = df["Median_Income"].fillna(df["Median_Income"].median())
+    df["School_Score_External"] = df["School_Score_External"].fillna(df["School_Score_External"].median())
 
-    # B. Real school merge
+    # Real school merge
     df["Matched_School"] = df["Neighborhood"].map(neighborhood_to_school)
 
     df["School_Index_Real"] = df["Matched_School"].map(school_index_map)
@@ -129,11 +179,11 @@ def add_features(df):
 
     df["School_Merge_Type"] = np.where(
         df["Neighborhood"].isin(neighborhood_to_school.keys()),
-        "Exact name-based school proxy",
+        "Exact name based school proxy",
         "Ames district weighted average"
     )
 
-    #Age features
+    # Age features
     df["HouseAge"] = df["YrSold"] - df["YearBuilt"]
     df["RemodAge"] = df["YrSold"] - df["YearRemodAdd"]
 
@@ -142,7 +192,7 @@ def add_features(df):
     else:
         df["GarageAge"] = np.nan
 
-    #Total area / utility
+    # Total area and utility
     df["TotalSF"] = (
         df["TotalBsmtSF"].fillna(0)
         + df["1stFlrSF"].fillna(0)
@@ -171,15 +221,14 @@ def add_features(df):
         + df["ScreenPorch"].fillna(0)
     )
 
-    #Binary indicators
+    # Binary indicators
     df["HasGarage"] = (df["GarageArea"].fillna(0) > 0).astype(int)
     df["HasBasement"] = (df["TotalBsmtSF"].fillna(0) > 0).astype(int)
     df["HasFireplace"] = (df["Fireplaces"].fillna(0) > 0).astype(int)
     df["HasPool"] = (df["PoolArea"].fillna(0) > 0).astype(int)
     df["Has2ndFloor"] = (df["2ndFlrSF"].fillna(0) > 0).astype(int)
 
-
-    #Existing interaction features
+    # Existing interaction features
     df["QualityLivArea"] = df["OverallQual"].fillna(0) * df["GrLivArea"].fillna(0)
     df["BathPerBedroom"] = df["TotalBath"] / (df["BedroomAbvGr"].fillna(0) + 1)
     df["GarageScore"] = df["GarageCars"].fillna(0) * df["GarageArea"].fillna(0)
@@ -188,7 +237,12 @@ def add_features(df):
     df["LivingArea_x_School"] = df["GrLivArea"].fillna(0) * df["School_Score_Norm"].fillna(0)
     df["Age_x_School"] = df["HouseAge"].fillna(0) * df["School_Score_Norm"].fillna(0)
 
-    #NEW engineered features
+    # External location based interaction features
+    df["Quality_x_Income"] = df["OverallQual"].fillna(0) * df["Median_Income"].fillna(0)
+    df["Quality_x_ExternalSchool"] = df["OverallQual"].fillna(0) * df["School_Score_External"].fillna(0)
+    df["Age_x_Distance"] = df["HouseAge"].fillna(0) * df["Dist_CityHall_Miles"].fillna(0)
+
+    # Additional engineered features
     df["TotalHomeQuality"] = df["OverallQual"].fillna(0) + df["OverallCond"].fillna(0)
     df["TotalHouseSF"] = df["TotalSF"] + df["GarageArea"].fillna(0)
     df["LivLotRatio"] = df["GrLivArea"].fillna(0) / df["LotArea"].replace(0, np.nan)
@@ -204,6 +258,7 @@ def add_features(df):
 
     return df
 
+
 train_df = add_features(train_df)
 test_df = add_features(test_df)
 
@@ -216,12 +271,16 @@ print(
             "School_Index_Real",
             "School_Score_Norm",
             "School_Rating_Category_Real",
-            "School_Merge_Type"
+            "School_Merge_Type",
+            "Median_Income",
+            "School_Score_External",
+            "Dist_CityHall_Miles"
         ]
     ].head(10).to_string(index=False)
 )
 
-#OUTLIER FILTERING
+
+# OUTLIER FILTERING
 before_outlier = train_df.shape[0]
 
 train_keep = ~(
@@ -235,7 +294,8 @@ after_outlier = train_df.shape[0]
 print(f"\nOutlier removal: removed {before_outlier - after_outlier} rows")
 print("Train shape after outlier removal:", train_df.shape)
 
-#SPLIT FEATURES / TARGET
+
+# SPLIT FEATURES AND TARGET
 X = train_df.drop(columns=[TARGET])
 y = train_df[TARGET]
 y_log = np.log1p(y)
@@ -252,12 +312,13 @@ print("Numeric features    :", len(numeric_features))
 print("Categorical features:", len(categorical_features))
 
 
-#PREPROCESSOR
+# PREPROCESSOR
 def build_onehot():
     try:
         return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
     except TypeError:
         return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
 
 numeric_transformer = Pipeline(
     steps=[
@@ -280,7 +341,8 @@ preprocessor = ColumnTransformer(
     ]
 )
 
-#HELPER FUNCTIONS
+
+# HELPER FUNCTIONS
 def evaluate_model(name, model, X_train, y_train, X_valid, y_valid):
     y_train_actual = np.expm1(y_train)
     sample_weight = np.where(y_train_actual > 300000, 2, 1)
@@ -305,6 +367,7 @@ def evaluate_model(name, model, X_train, y_train, X_valid, y_valid):
         "Valid_R2": r2_valid,
     }
 
+
 def plot_actual_vs_pred(y_true_log, y_pred_log, title, filename):
     y_true = np.expm1(y_true_log)
     y_pred = np.maximum(np.expm1(y_pred_log), 0)
@@ -327,6 +390,7 @@ def plot_actual_vs_pred(y_true_log, y_pred_log, title, filename):
     plt.pause(2)
     plt.close()
 
+
 def plot_residuals(y_true_log, y_pred_log, filename):
     y_true = np.expm1(y_true_log)
     y_pred = np.maximum(np.expm1(y_pred_log), 0)
@@ -348,6 +412,7 @@ def plot_residuals(y_true_log, y_pred_log, filename):
     plt.pause(2)
     plt.close()
 
+
 def save_feature_importance_plot(feature_importance_df, model_name, filename):
     plt.figure(figsize=(10, 7))
     top_features = feature_importance_df.head(20).iloc[::-1]
@@ -364,7 +429,8 @@ def save_feature_importance_plot(feature_importance_df, model_name, filename):
     plt.pause(2)
     plt.close()
 
-#BASELINE MODELS
+
+# BASELINE MODELS
 results_list = []
 models_dict = {}
 
@@ -445,7 +511,8 @@ if HAS_XGB:
     results_list.append(evaluate_model("XGBoost", xgb_model, X_train, y_train, X_valid, y_valid))
     models_dict["XGBoost"] = xgb_model
 
-#STACKING + PCA RIDGE
+
+# STACKING AND PCA RIDGE
 base_estimators = [
     ("rf", RandomForestRegressor(
         n_estimators=400,
@@ -518,7 +585,8 @@ results_list.append(
 )
 models_dict["PCA + Ridge"] = pca_linear_model
 
-#MODEL COMPARISON
+
+# MODEL COMPARISON
 results_df = pd.DataFrame(results_list).sort_values(by="Valid_RMSE").reset_index(drop=True)
 
 print("\nModel Comparison:")
@@ -529,9 +597,9 @@ results_df.to_csv(results_path, index=False)
 print(f"\nSaved model comparison table: {results_path}")
 
 
-#CROSS-VALIDATION FOR XGBOOST
+# CROSS VALIDATION FOR XGBOOST
 if HAS_XGB:
-    print("\nRunning 5-Fold Cross-Validation for XGBoost...")
+    print("\nRunning 5 Fold Cross Validation for XGBoost...")
 
     kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
 
@@ -577,7 +645,7 @@ if HAS_XGB:
     print(f"Saved CV results: {cv_path}")
 
 
-#BEST MODEL + VALIDATION PLOTS
+# BEST MODEL AND VALIDATION PLOTS
 best_model_name = results_df.iloc[0]["Model"]
 best_model = models_dict[best_model_name]
 
@@ -595,8 +663,9 @@ plot_actual_vs_pred(
 )
 
 
-#XGBOOST EARLY STOPPING
+# XGBOOST EARLY STOPPING
 xgb_early_model = None
+early_results = None
 
 if HAS_XGB:
     print("\nTraining XGBoost with early stopping...")
@@ -649,7 +718,8 @@ if HAS_XGB:
     print(early_results.to_string(index=False))
     print(f"Saved early stopping results: {early_results_path}")
 
-#SHAP EXPLAINABILITY
+
+# SHAP EXPLAINABILITY
 shap_ready_model = None
 shap_ready_name = None
 fitted_preprocessor = None
@@ -673,7 +743,7 @@ elif HAS_XGB:
         random_state=RANDOM_STATE,
         n_jobs=-1
     )
-elif True:
+else:
     shap_ready_name = "Extra Trees"
     shap_ready_model = ExtraTreesRegressor(
         n_estimators=500,
@@ -758,10 +828,11 @@ if HAS_SHAP and shap_ready_model is not None:
 else:
     print("\nSHAP not available. Skipping explainability plots.")
 
-#FINAL MODEL TRAINING
+
+# FINAL MODEL TRAINING
 use_early_stopping_for_final = False
 
-if HAS_XGB and xgb_early_model is not None:
+if HAS_XGB and xgb_early_model is not None and early_results is not None:
     early_rmse_value = early_results.loc[0, "Valid_RMSE"]
     best_rmse_value = results_df.iloc[0]["Valid_RMSE"]
 
@@ -821,17 +892,18 @@ submission = pd.DataFrame({
     "SalePrice": test_pred
 })
 
-submission_path = os.path.join(OUTPUT_DIR, "submission_real_school_model.csv")
+submission_path = os.path.join(OUTPUT_DIR, "submission_real_school_external_model.csv")
 submission.to_csv(submission_path, index=False)
 print(f"\nSubmission file saved as: {submission_path}")
 print(submission.head())
 
-#FINAL FEATURED DATA
-train_featured_path = os.path.join(OUTPUT_DIR, "train_real_school_features.csv")
-test_featured_path = os.path.join(OUTPUT_DIR, "test_real_school_features.csv")
+
+# FINAL FEATURED DATA
+train_featured_path = os.path.join(OUTPUT_DIR, "train_featured.csv")
+test_featured_path = os.path.join(OUTPUT_DIR, "test_featured.csv")
 
 train_df.to_csv(train_featured_path, index=False)
 test_df.to_csv(test_featured_path, index=False)
 
-print(f"\nFeatured datasets saved as:\n- {train_featured_path}\n- {test_featured_path}")
+print(f"\nFeatured datasets saved as:\n{train_featured_path}\n{test_featured_path}")
 print("\nAll done.")
