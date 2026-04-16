@@ -40,7 +40,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 TRAIN_PATH = os.path.join(BASE_DIR, "train.csv")
 TEST_PATH = os.path.join(BASE_DIR, "test.csv")
-SCHOOL_PATH = "/Users/varun/Downloads/ISPP_School_Summary.xlsx"
+SCHOOL_PATH = os.path.join(BASE_DIR, "externaldata", "ISPP_School_Summary.xlsx")
 
 OUTPUT_DIR = os.path.join(BASE_DIR, "housing_outputs")
 EXTERNAL_DIR = os.path.join(BASE_DIR, "externaldata")
